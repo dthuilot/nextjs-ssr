@@ -8,7 +8,7 @@
     "start": "next start",
     "start:standalone": "node .next/standalone/server.js",
     "local:lambda": "node scripts/local-lambda.js",
-    "lint": "next lint",
+    "lint": "eslint .",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
