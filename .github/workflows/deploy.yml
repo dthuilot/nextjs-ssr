@@ -1,0 +1,84 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+# Prevent concurrent deployments
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to AWS
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_ASSET_PREFIX: ${{ vars.CLOUDFRONT_URL }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # ── Static assets → S3 / CloudFront ──────────────────────────────────
+      - name: Deploy static assets to S3
+        run: bash scripts/deploy-static.sh
+        env:
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          CLOUDFRONT_DIST_ID: ${{ vars.CLOUDFRONT_DIST_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+
+      # ── SSR server → Lambda ───────────────────────────────────────────────
+      - name: Package Lambda
+        run: |
+          # The Lambda zip contains:
+          #   - .next/standalone/  (Next.js standalone server + node_modules)
+          #   - lambda/handler.js  (our Lambda entry point)
+          cp lambda/handler.js .next/standalone/handler.js
+          cd .next/standalone
+          zip -r ../../lambda-package.zip . --quiet
+          echo "Lambda package size: $(du -sh ../../lambda-package.zip | cut -f1)"
+
+      - name: Deploy Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }} \
+            --zip-file fileb://lambda-package.zip \
+            --region ${{ vars.AWS_REGION }}
+
+          # Wait for the update to complete before publishing
+          aws lambda wait function-updated \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }} \
+            --region ${{ vars.AWS_REGION }}
+
+          aws lambda publish-version \
+            --function-name ${{ vars.LAMBDA_FUNCTION_NAME }} \
+            --region ${{ vars.AWS_REGION }}
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment complete" >> $GITHUB_STEP_SUMMARY
+          echo "- **Static assets**: s3://${{ vars.S3_BUCKET }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CloudFront**: ${{ vars.CLOUDFRONT_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lambda**: ${{ vars.LAMBDA_FUNCTION_NAME }}" >> $GITHUB_STEP_SUMMARY
